@@ -1,0 +1,556 @@
+<?php
+
+namespace App\Http\Controllers\User;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use App\Models\Criteria;
+use App\Models\Alternative;
+use App\Models\MooraScore;
+use Barryvdh\DomPDF\Facade\Pdf;
+
+class RecommendationController extends Controller
+{
+    public function index()
+    {
+        $userId = Auth::id();
+
+        /* =====================================================
+         * ===================== FUZZY AHP =====================
+         * ===================================================== */
+
+        $pairwise = DB::table('pairwise')
+            ->where('user_id', $userId)
+            ->get();
+
+        if ($pairwise->isEmpty()) {
+            return redirect()->route('pairwise.index')
+                ->with('error','Silakan isi perbandingan kriteria terlebih dahulu');
+        }
+
+        $criteriaIds = $pairwise->pluck('criteria_1')
+            ->merge($pairwise->pluck('criteria_2'))
+            ->unique()
+            ->values();
+
+        $criteria = Criteria::whereIn('id', $criteriaIds)
+            ->orderBy('code')
+            ->get();
+
+        /* ================= MATRKS FUZZY ================= */
+        /* ================= MATRKS FUZZY ================= */
+$matrixFuzzy = [];
+
+// 🔥 VALIDASI WAJIB (biar matrix tidak bolong)
+$total = count($criteriaIds);
+$expected = ($total * ($total - 1)) / 2;
+
+if ($pairwise->count() < $expected) {
+    return redirect()->route('pairwise.index')
+        ->with('error', 'Silakan lengkapi semua perbandingan terlebih dahulu.');
+}
+
+foreach ($criteriaIds as $i) {
+    foreach ($criteriaIds as $j) {
+
+        if ($i == $j) {
+
+            $matrixFuzzy[$i][$j] = [1,1,1];
+
+        } else {
+
+            // =====================
+            // CEK LANGSUNG (i → j)
+            // =====================
+            $row = $pairwise->first(fn($r)=>
+                $r->criteria_1 == $i && $r->criteria_2 == $j
+            );
+
+            if ($row) {
+
+                $matrixFuzzy[$i][$j] = json_decode($row->fuzzy_value, true);
+
+            } else {
+
+                // =====================
+                // CEK KEBALIKAN (j → i)
+                // =====================
+                $row = $pairwise->first(fn($r)=>
+                    $r->criteria_1 == $j && $r->criteria_2 == $i
+                );
+
+                if ($row) {
+
+                    $v = json_decode($row->fuzzy_value, true);
+
+                    $matrixFuzzy[$i][$j] = [
+                        1/$v[2],
+                        1/$v[1],
+                        1/$v[0]
+                    ];
+
+                } else {
+
+                    // 🔥 FIX UTAMA (BIAR TIDAK ERROR)
+                    $matrixFuzzy[$i][$j] = [1,1,1];
+
+                }
+            }
+        }
+    }
+}
+        
+
+        /* ================= UJI KONSISTENSI ================= */
+
+        $matrixM = [];
+        foreach ($matrixFuzzy as $i => $row) {
+            foreach ($row as $j => $v) {
+                $matrixM[$i][$j] = $v[1]; // nilai tengah
+            }
+        }
+
+        $n = count($matrixM);
+        $keys = array_keys($matrixM);
+
+        // jumlah kolom
+        $sumCol = [];
+        foreach ($keys as $j) {
+            $sumCol[$j] = 0;
+            foreach ($keys as $i) {
+                $sumCol[$j] += $matrixM[$i][$j];
+            }
+        }
+
+        // normalisasi
+        $norm = [];
+        foreach ($keys as $i) {
+            foreach ($keys as $j) {
+                $norm[$i][$j] = $matrixM[$i][$j] / $sumCol[$j];
+            }
+        }
+
+        // bobot sementara
+        $w = [];
+        foreach ($keys as $i) {
+            $w[$i] = array_sum($norm[$i]) / $n;
+        }
+
+        // lambda max
+        $lambdaMax = 0;
+        foreach ($keys as $i) {
+            $rowSum = 0;
+            foreach ($keys as $j) {
+                $rowSum += $matrixM[$i][$j] * $w[$j];
+            }
+            $lambdaMax += $rowSum / $w[$i];
+        }
+        $lambdaMax /= $n;
+
+        $CI = ($lambdaMax - $n) / ($n - 1);
+        $RI = [1=>0,2=>0,3=>0.58,4=>0.9,5=>1.12];
+        $CR = $CI / ($RI[$n] ?? 1);
+        // ================= DETEKSI INKONSISTENSI =================
+$inconsistency = [];
+
+foreach ($keys as $i) {
+    foreach ($keys as $j) {
+        foreach ($keys as $k) {
+
+            if ($i != $j && $j != $k && $i != $k) {
+
+                $expected = $matrixM[$i][$j] * $matrixM[$j][$k];
+                $actual   = $matrixM[$i][$k];
+
+                $diff = abs($expected - $actual);
+
+                $inconsistency[] = [
+                    'i' => $i,
+                    'j' => $j,
+                    'k' => $k,
+                    'expected' => $expected,
+                    'actual' => $actual,
+                    'diff' => $diff
+                ];
+            }
+        }
+    }
+}
+
+usort($inconsistency, fn($a,$b) => $b['diff'] <=> $a['diff']);
+
+$topErrors = array_slice($inconsistency, 0, 3);
+// ================= SUGGESTION (LOCAL ADJUSTMENT) =================
+$mainError = $inconsistency[0] ?? null;
+
+$suggestion = null;
+
+if ($mainError) {
+
+    $i = $mainError['i'];
+    $k = $mainError['k'];
+    $expected = $mainError['expected'];
+
+    // batasi ke skala Saaty 1 - 9
+    $suggested = min(max(round($expected), 1), 9);
+
+    // mapping ke label
+    if ($suggested <= 1) $label = 'Sama Penting';
+    elseif ($suggested <= 3) $label = 'Sedikit Lebih Penting';
+    elseif ($suggested <= 5) $label = 'Lebih Penting';
+    elseif ($suggested <= 7) $label = 'Sangat Lebih Penting';
+    else $label = 'Mutlak Lebih Penting';
+
+    $suggestion = [
+        'i' => $i,
+        'k' => $k,
+        'value' => $suggested,
+        'label' => $label
+    ];
+}
+
+        
+
+// 🔥 VALIDASI WAJIB (INI KUNCI)
+if ($CR > 0.1) {
+    return redirect()->route('pairwise.index')
+        ->with('error', 'Perbandingan tidak konsisten (CR > 0.1).')
+        ->with('topErrors', $topErrors)
+        ->with('suggestion', $suggestion) // 🔥 TAMBAH INI
+        ->with('oldPairs', $pairwise);
+}
+        /* ================= GEOMETRIC MEAN ================= */
+
+        $GM = [];
+
+        foreach ($matrixFuzzy as $i => $row) {
+            $l = 1; $m = 1; $u = 1;
+            $nRow = count($row);
+
+            foreach ($row as $v) {
+                $l *= $v[0];
+                $m *= $v[1];
+                $u *= $v[2];
+            }
+
+            $GM[$i] = [
+                pow($l, 1/$nRow),
+                pow($m, 1/$nRow),
+                pow($u, 1/$nRow),
+            ];
+        }
+
+        /* ================= TOTAL GM ================= */
+
+        $sumGM = [0,0,0];
+        foreach ($GM as $g) {
+            $sumGM[0] += $g[0];
+            $sumGM[1] += $g[1];
+            $sumGM[2] += $g[2];
+        }
+
+        /* ================= BOBOT FUZZY ================= */
+
+        $fuzzyWeight = [];
+
+        foreach ($GM as $i => $g) {
+            $fuzzyWeight[$i] = [
+                $g[0] / $sumGM[2],
+                $g[1] / $sumGM[1],
+                $g[2] / $sumGM[0],
+            ];
+        }
+
+        /* ================= DEFUZZIFIKASI ================= */
+
+        $defuzz = [];
+
+        foreach ($fuzzyWeight as $i => $f) {
+            $defuzz[$i] = ($f[0] + $f[1] + $f[2]) / 3;
+        }
+
+        /* ================= NORMALISASI ================= */
+
+        $total = array_sum($defuzz);
+        $weights = [];
+
+        foreach ($defuzz as $i => $d) {
+            $weights[$i] = $d / $total;
+        }
+
+        /* =====================================================
+         * ======================== MOORA ======================
+         * ===================================================== */
+
+        $alternatives = Alternative::with('product')->get();
+
+        $matrix = [];
+        foreach ($alternatives as $alt) {
+            foreach ($criteria as $c) {
+                $matrix[$alt->id][$c->id] =
+                    MooraScore::where('alternative_id',$alt->id)
+                        ->where('criteria_id',$c->id)
+                        ->value('nilai') ?? 0;
+            }
+        }
+
+        /* === NORMALISASI === */
+        $normalisasi = [];
+        $pembagi = [];
+
+        foreach ($criteria as $c) {
+            $sum = 0;
+
+            foreach ($alternatives as $alt) {
+                $sum += pow($matrix[$alt->id][$c->id], 2);
+            }
+
+            $pembagi[$c->id] = sqrt($sum);
+
+            foreach ($alternatives as $alt) {
+                $normalisasi[$alt->id][$c->id] =
+                    $pembagi[$c->id] == 0
+                        ? 0
+                        : $matrix[$alt->id][$c->id] / $pembagi[$c->id];
+            }
+        }
+
+        /* === TERBOBOT === */
+        $terbobot = [];
+        foreach ($alternatives as $alt) {
+            foreach ($criteria as $c) {
+                $terbobot[$alt->id][$c->id] =
+                    $normalisasi[$alt->id][$c->id] * $weights[$c->id];
+            }
+        }
+
+        /* === OPTIMASI === */
+        $optimasi = [];
+        foreach ($alternatives as $alt) {
+
+            $benefit = 0;
+            $cost = 0;
+
+            foreach ($criteria as $c) {
+                if ($c->type === 'benefit') {
+                    $benefit += $terbobot[$alt->id][$c->id];
+                } else {
+                    $cost += $terbobot[$alt->id][$c->id];
+                }
+            }
+
+            $optimasi[$alt->id] = $benefit - $cost;
+        }
+
+        arsort($optimasi);
+
+        /* === TOP 5 (FIX) === */
+$recommendedProducts = [];
+
+foreach ($optimasi as $altId => $score) {
+    $alt = $alternatives->firstWhere('id', $altId);
+
+    if ($alt) {
+        $recommendedProducts[] = [
+            'alternative' => $alt, // 🔥 pakai alternative
+            'score'       => $score
+        ];
+    }
+}
+
+$recommendedProducts = array_slice($recommendedProducts, 0, 5);
+
+return view('user.recommendation.index', compact(
+    'criteria',
+    'alternatives',
+    'matrixFuzzy',
+    'GM',
+    'fuzzyWeight',
+    'defuzz',
+    'weights',
+    'CR',
+    'topErrors',
+    'matrix',
+    'normalisasi',
+    'terbobot',
+    'optimasi',
+    'recommendedProducts'
+));
+    }
+public function exportPdf()
+{
+    $userId = Auth::id();
+
+    /* ================= FUZZY AHP ================= */
+    $pairwise = DB::table('pairwise')
+        ->where('user_id', $userId)
+        ->get();
+
+    $criteriaIds = $pairwise->pluck('criteria_1')
+        ->merge($pairwise->pluck('criteria_2'))
+        ->unique()
+        ->values();
+
+    $criteria = Criteria::whereIn('id', $criteriaIds)
+        ->orderBy('code')
+        ->get();
+
+    // ================= MATRIX FUZZY =================
+    $matrixFuzzy = [];
+
+    foreach ($criteriaIds as $i) {
+        foreach ($criteriaIds as $j) {
+
+            if ($i == $j) {
+                $matrixFuzzy[$i][$j] = [1,1,1];
+            } else {
+                $row = $pairwise->first(fn($r)=>
+                    $r->criteria_1 == $i && $r->criteria_2 == $j
+                );
+
+                if ($row) {
+                    $matrixFuzzy[$i][$j] = json_decode($row->fuzzy_value, true);
+                } else {
+                    $row = $pairwise->first(fn($r)=>
+                        $r->criteria_1 == $j && $r->criteria_2 == $i
+                    );
+
+                    $v = json_decode($row->fuzzy_value, true);
+
+                    $matrixFuzzy[$i][$j] = [
+                        1/$v[2],
+                        1/$v[1],
+                        1/$v[0]
+                    ];
+                }
+            }
+        }
+    }
+
+    // ================= GEOMETRIC MEAN =================
+    $GM = [];
+
+    foreach ($matrixFuzzy as $i => $row) {
+        $l = 1; $m = 1; $u = 1;
+        $nRow = count($row);
+
+        foreach ($row as $v) {
+            $l *= $v[0];
+            $m *= $v[1];
+            $u *= $v[2];
+        }
+
+        $GM[$i] = [
+            pow($l, 1/$nRow),
+            pow($m, 1/$nRow),
+            pow($u, 1/$nRow),
+        ];
+    }
+
+    // ================= TOTAL GM =================
+    $sumGM = [0,0,0];
+    foreach ($GM as $g) {
+        $sumGM[0] += $g[0];
+        $sumGM[1] += $g[1];
+        $sumGM[2] += $g[2];
+    }
+
+    // ================= FUZZY WEIGHT =================
+    $fuzzyWeight = [];
+
+    foreach ($GM as $i => $g) {
+        $fuzzyWeight[$i] = [
+            $g[0] / $sumGM[2],
+            $g[1] / $sumGM[1],
+            $g[2] / $sumGM[0],
+        ];
+    }
+
+    // ================= DEFUZZ =================
+    $defuzz = [];
+
+    foreach ($fuzzyWeight as $i => $f) {
+        $defuzz[$i] = ($f[0] + $f[1] + $f[2]) / 3;
+    }
+
+    // ================= NORMALISASI =================
+    $total = array_sum($defuzz);
+    $weights = [];
+
+    foreach ($defuzz as $i => $d) {
+        $weights[$i] = $d / $total;
+    }
+
+    /* ================= MOORA ================= */
+
+    $alternatives = Alternative::with('product')->get();
+
+    $matrix = [];
+    foreach ($alternatives as $alt) {
+        foreach ($criteria as $c) {
+            $matrix[$alt->id][$c->id] =
+                MooraScore::where('alternative_id',$alt->id)
+                    ->where('criteria_id',$c->id)
+                    ->value('nilai') ?? 0;
+        }
+    }
+
+    // NORMALISASI
+    $normalisasi = [];
+    $pembagi = [];
+
+    foreach ($criteria as $c) {
+        $sum = 0;
+
+        foreach ($alternatives as $alt) {
+            $sum += pow($matrix[$alt->id][$c->id], 2);
+        }
+
+        $pembagi[$c->id] = sqrt($sum);
+
+        foreach ($alternatives as $alt) {
+            $normalisasi[$alt->id][$c->id] =
+                $pembagi[$c->id] == 0
+                    ? 0
+                    : $matrix[$alt->id][$c->id] / $pembagi[$c->id];
+        }
+    }
+
+    // TERBOBOT
+    $terbobot = [];
+    foreach ($alternatives as $alt) {
+        foreach ($criteria as $c) {
+            $terbobot[$alt->id][$c->id] =
+                $normalisasi[$alt->id][$c->id] * $weights[$c->id];
+        }
+    }
+
+    // OPTIMASI
+    $optimasi = [];
+
+    foreach ($alternatives as $alt) {
+        $benefit = 0;
+        $cost = 0;
+
+        foreach ($criteria as $c) {
+            if ($c->type == 'benefit') {
+                $benefit += $terbobot[$alt->id][$c->id];
+            } else {
+                $cost += $terbobot[$alt->id][$c->id];
+            }
+        }
+
+        $optimasi[$alt->id] = $benefit - $cost;
+    }
+
+    arsort($optimasi);
+
+    $pdf = Pdf::loadView('user.recommendation.pdf', compact(
+        'optimasi',
+        'alternatives'
+    ));
+
+    return $pdf->download('laporan-moora.pdf');
+}
+}
