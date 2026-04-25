@@ -1,0 +1,273 @@
+<?php
+
+namespace App\Http\Controllers\User;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use App\Models\Criteria;
+use Illuminate\Support\Facades\Auth;
+
+class PairwiseController extends Controller
+{
+    public function index()
+    {
+        $criteria = Criteria::all();
+        return view('user.pairwise.index', compact('criteria'));
+    }
+
+    public function store(Request $request)
+    {
+        $action = $request->input('action', 'save');
+        $dominant = $request->input('dominant_criteria');
+if ($action === 'save') {
+    $request->validate([
+        'pairs' => 'required|array'
+    ]);
+}
+        $action = $request->input('action', 'save');
+
+if ($action === 'save') {
+    $request->validate([
+        'pairs' => 'required|array'
+    ]);
+}
+
+
+        // =============================
+        // 🔥 AUTO FIX (LOCAL ADJUSTMENT)
+        // =============================
+       if ($action === 'auto_fix' && session('suggestion')) {
+
+    $pairs = $request->pairs;
+    $s = session('suggestion');
+
+    foreach ($pairs as &$pair) {
+      // 🔥 TAMBAHKAN DI SINI
+    if ($dominant) {
+
+        if ($pair['c1'] == $dominant || $pair['c2'] == $dominant) {
+
+            // arahkan ke dominan
+            if ($pair['c1'] == $dominant) {
+                $pair['chosen'] = $pair['c1'];
+            } else {
+                $pair['chosen'] = $pair['c2'];
+            }
+
+            // kasih kekuatan minimal
+            if (!isset($pair['importance']) || $pair['importance'] == 'equal') {
+                $pair['importance'] = 'moderate';
+            }
+        }
+    }
+        // 🔥 isi default kalau kosong
+       $oldPairs = session('oldPairs');
+
+if (!isset($pair['importance']) && $oldPairs) {
+    foreach ($oldPairs as $op) {
+        if (
+            ($op->criteria_1 == $pair['c1'] && $op->criteria_2 == $pair['c2']) ||
+            ($op->criteria_1 == $pair['c2'] && $op->criteria_2 == $pair['c1'])
+        ) {
+            $pair['importance'] = $op->importance;
+        }
+    }
+}
+
+
+
+// kalau masih kosong baru skip
+if (!isset($pair['importance'])) {
+    continue;
+} // 🔥 ini yang benar
+
+
+        if (!isset($pair['chosen'])) {
+            $pair['chosen'] = $pair['c1'];
+        }
+
+        // 🔥 local adjustment
+        if (
+            ($pair['c1'] == $s['i'] && $pair['c2'] == $s['k']) ||
+            ($pair['c1'] == $s['k'] && $pair['c2'] == $s['i'])
+        ) {
+
+            if ($s['value'] <= 1) $pair['importance'] = 'equal';
+            elseif ($s['value'] <= 3) $pair['importance'] = 'moderate';
+            elseif ($s['value'] <= 5) $pair['importance'] = 'strong';
+            elseif ($s['value'] <= 7) $pair['importance'] = 'very_strong';
+            else $pair['importance'] = 'extreme';
+            if ($pair['c1'] == $s['i']) {
+    $pair['chosen'] = $pair['c1'];
+} else {
+    $pair['chosen'] = $pair['c2'];
+}
+        }
+    }
+
+    $request->merge(['pairs' => $pairs]);
+    // 🔥 WAJIB: update session biar blade kebaca perubahan
+session([
+    'oldPairs' => collect($pairs)->map(function($p){
+        return (object)[
+            'criteria_1' => $p['c1'],
+            'criteria_2' => $p['c2'],
+            'importance' => $p['importance'],
+        ];
+    })
+]);
+// =============================
+// 🔥 TAMBAHAN: SIMPAN KE DATABASE
+// =============================
+$userId = Auth::id();
+
+DB::table('pairwise')->where('user_id', $userId)->delete();
+
+foreach ($pairs as $pair) {
+
+    if (!isset($pair['importance'])) continue;
+
+    $map = [
+        'equal'        => [1, 1, 1],
+        'moderate'     => [2, 3, 4],
+        'strong'       => [4, 5, 6],
+        'very_strong'  => [6, 7, 8],
+        'extreme'      => [9, 9, 9],
+    ];
+
+    $fuzzy = $map[$pair['importance']];
+
+    if ($pair['importance'] !== 'equal') {
+        if ($pair['chosen'] == $pair['c2']) {
+            $fuzzy = [
+                1 / $fuzzy[2],
+                1 / $fuzzy[1],
+                1 / $fuzzy[0],
+            ];
+        }
+    }
+
+    DB::table('pairwise')->insert([
+        'user_id'     => $userId,
+        'criteria_1'  => (int) $pair['c1'],
+        'criteria_2'  => (int) $pair['c2'],
+        'importance'  => $pair['importance'],
+        'fuzzy_value' => json_encode($fuzzy),
+        'created_at'  => now(),
+        'updated_at'  => now(),
+    ]);
+}
+return redirect()->route('pairwise.index');
+}
+
+        // =============================
+        // ✅ SKALA TFN
+        // =============================
+        $map = [
+            'equal'        => [1, 1, 1],
+            'moderate'     => [2, 3, 4],
+            'strong'       => [4, 5, 6],
+            'very_strong'  => [6, 7, 8],
+            'extreme'      => [9, 9, 9],
+        ];
+
+        $userId = Auth::id();
+
+        // =============================
+        // 🔄 HAPUS DATA LAMA
+        // =============================
+        if ($action === 'save') {
+    DB::table('pairwise')->where('user_id', $userId)->delete();
+}
+
+        // =============================
+        // 🔄 LOOP SIMPAN
+        // =============================
+        foreach ($request->pairs as $pair) {
+
+    // 🔥 SKIP kalau belum diisi
+    if (!isset($pair['importance'])) {
+        continue;
+    }
+
+            // VALIDASI
+            if (
+    !isset($pair['importance']) ||
+    !isset($map[$pair['importance']]) ||
+    !isset($pair['c1']) ||
+    !isset($pair['c2'])
+) {
+    continue; // 🔥 jangan error, skip aja
+}
+
+            $fuzzy = $map[$pair['importance']];
+
+            // =============================
+            // HANDLE EQUAL
+            // =============================
+            if ($pair['importance'] === 'equal') {
+
+                $chosen = $pair['c1']; // bebas
+
+            } else {
+
+                if (!isset($pair['chosen'])) {
+
+    if ($request->has('auto_fix')) {
+        $pair['chosen'] = $pair['c1']; // default
+    } else {
+        return back()->with('error', 'Silakan pilih kriteria...');
+    }
+}
+
+                $chosen = $pair['chosen'];
+
+                // =============================
+                // 🔄 RECIPROCAL
+                // =============================
+                if ($chosen == $pair['c2']) {
+                    $fuzzy = [
+                        1 / $fuzzy[2],
+                        1 / $fuzzy[1],
+                        1 / $fuzzy[0],
+                    ];
+                }
+            }
+
+            // =============================
+            // 💾 SIMPAN
+            // =============================
+            DB::table('pairwise')->insert([
+                'user_id'     => $userId,
+                'criteria_1'  => (int) $pair['c1'],
+                'criteria_2'  => (int) $pair['c2'],
+                'importance'  => $pair['importance'],
+                'fuzzy_value' => json_encode($fuzzy),
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ]);
+        }
+
+        // =============================
+        // 🔁 SIMPAN UNTUK REDISPLAY (BIAR GA KOSONG)
+        // =============================
+        session(['oldPairs' => collect($request->pairs)->map(function($p){
+            return (object)[
+                'criteria_1' => $p['c1'],
+                'criteria_2' => $p['c2'],
+               'importance' => $p['importance'] ?? null
+            ];
+        })]);
+
+        // =============================
+        // 🚀 REDIRECT
+        // =============================
+        if ($action === 'auto_fix') {
+    return redirect()->route('pairwise.index');
+}
+        return redirect()
+            ->route('user.recommendation.index')
+            ->with('success', 'Pairwise berhasil disimpan');
+    }
+}
