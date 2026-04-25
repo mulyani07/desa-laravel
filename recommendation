@@ -1,0 +1,367 @@
+@extends('layouts.user')
+@section('title','Rekomendasi Produk')
+
+@section('content')
+
+<div class="spk-layout">
+
+    {{-- ===================== SIDEBAR ===================== --}}
+    <aside class="spk-sidebar">
+        <h3>Proses SPK</h3>
+
+        <ul class="spk-steps">
+            <li>1. Pairwise Kriteria</li>
+            <li class="active">2. Rekomendasi</li>
+        </ul>
+
+        <p class="spk-note">
+            Sistem memberikan rekomendasi produk
+            berdasarkan perhitungan <strong>Fuzzy AHP</strong>
+            dan <strong>MOORA</strong>.
+        </p>
+    </aside>
+
+    {{-- ===================== MAIN CONTENT ===================== --}}
+    <section class="spk-main">
+
+        {{-- HEADER --}}
+        <div class="pairwise-header">
+            <h2>Hasil Rekomendasi Produk</h2>
+            <p>
+                Berikut hasil perhitungan dan rekomendasi produk terbaik.
+            </p>
+        </div>
+
+        {{-- ===================== RINGKASAN ===================== --}}
+        <div class="summary-grid">
+
+            {{-- FUZZY --}}
+            <div class="summary-box flex-box">
+                <h4>Ringkasan Bobot Kriteria (Fuzzy AHP)</h4>
+
+                @foreach($weights as $id=>$w)
+                    <div>
+                        {{ $criteria->firstWhere('id',$id)->name }}
+                        :
+                        <strong>{{ number_format($w,4) }}</strong>
+                    </div>
+                @endforeach
+
+                <p><strong>CR:</strong> {{ number_format($CR,4) }}</p>
+
+                <button class="btn btn-back"
+                        onclick="toggle('detail-fuzzy')">
+                    Detail Fuzzy AHP
+                </button>
+            </div>
+
+            {{-- MOORA --}}
+            <div class="summary-box flex-box">
+                <h4>Ringkasan Nilai Preferensi (MOORA)</h4>
+
+                @php
+    $topMoora = array_slice($optimasi, 0, 5, true);
+@endphp
+
+@foreach($topMoora as $id=>$v)
+    @php
+        $alt = $alternatives->firstWhere('id',$id);
+    @endphp
+    <div>
+        {{ $alt?->nama_kain ?? '-' }}
+        :
+        <strong>{{ number_format($v,4) }}</strong>
+    </div>
+@endforeach
+
+                <button class="btn btn-back"
+                        onclick="toggle('detail-moora')">
+                    Detail MOORA
+                </button>
+                <a href="{{ route('recommendation.export.pdf') }}"
+   class="btn btn-back btn-pdf">
+    Download PDF
+</a>
+            </div>
+
+        </div>
+
+        {{-- ===================== DETAIL FUZZY ===================== --}}
+        {{-- ===================== DETAIL FUZZY ===================== --}}
+<div id="detail-fuzzy" class="spk-card" style="display:none;margin-top:30px">
+
+    <h3>Detail Perhitungan Fuzzy AHP</h3>
+
+    {{-- STATUS CR --}}
+    @if($CR > 0.1)
+        <p style="color:red">
+            Matriks tidak konsisten (CR > 0.1). Silakan ulangi perbandingan pada tahap sebelumnya.
+        </p>
+    @else
+        <p style="color:green">
+            Matriks konsisten (CR ≤ 0.1).
+        </p>
+    @endif
+
+    {{-- 🔥 DIUBAH DI SINI --}}
+    <h4>Matriks Perbandingan Berpasangan</h4>
+    <div class="table-wrapper">
+        <table class="pairwise-table">
+            <tr>
+                <th>Kriteria</th>
+                @foreach($criteria as $c)
+                    <th>{{ $c->code }}</th>
+                @endforeach
+            </tr>
+
+            @foreach($criteria as $i)
+            <tr>
+                <td>{{ $i->code }}</td>
+                @foreach($criteria as $j)
+                    @php [$l,$m,$u] = $matrixFuzzy[$i->id][$j->id]; @endphp
+                    <td>
+                        ({{ number_format($l,4) }},
+                         {{ number_format($m,4) }},
+                         {{ number_format($u,4) }})
+                    </td>
+                @endforeach
+            </tr>
+            @endforeach
+        </table>
+    </div> {{-- ✅ FIX: ditutup di sini --}}
+
+    {{-- GM --}}
+    <h4>Fuzzy Geometric Mean</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Kriteria</th>
+            <th>l</th>
+            <th>m</th>
+            <th>u</th>
+        </tr>
+        @foreach($GM as $id=>$g)
+        <tr>
+            <td>{{ $criteria->firstWhere('id',$id)->code }}</td>
+            <td>{{ number_format($g[0],4) }}</td>
+            <td>{{ number_format($g[1],4) }}</td>
+            <td>{{ number_format($g[2],4) }}</td>
+        </tr>
+        @endforeach
+    </table>
+
+    {{-- FUZZY WEIGHT --}}
+    <h4>Bobot Fuzzy</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Kriteria</th>
+            <th>l</th>
+            <th>m</th>
+            <th>u</th>
+        </tr>
+        @foreach($fuzzyWeight as $id=>$f)
+        <tr>
+            <td>{{ $criteria->firstWhere('id',$id)->code }}</td>
+            <td>{{ number_format($f[0],4) }}</td>
+            <td>{{ number_format($f[1],4) }}</td>
+            <td>{{ number_format($f[2],4) }}</td>
+        </tr>
+        @endforeach
+    </table>
+
+    {{-- DEFUZZ --}}
+    <h4>Defuzzifikasi (COA)</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Kriteria</th>
+            <th>Nilai</th>
+        </tr>
+        @foreach($defuzz as $id=>$d)
+        <tr>
+            <td>{{ $criteria->firstWhere('id',$id)->code }}</td>
+            <td>{{ number_format($d,4) }}</td>
+        </tr>
+        @endforeach
+    </table>
+
+    {{-- FINAL --}}
+    <h4>Bobot Akhir</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Kriteria</th>
+            <th>Bobot</th>
+        </tr>
+        @foreach($weights as $id=>$w)
+        <tr>
+            <td>{{ $criteria->firstWhere('id',$id)->code }}</td>
+            <td>{{ number_format($w,4) }}</td>
+        </tr>
+        @endforeach
+    </table>
+
+</div>
+
+        {{-- ===================== DETAIL MOORA ===================== --}}
+<div id="detail-moora" class="spk-card" style="display:none;margin-top:30px">
+
+    <h3>Detail Perhitungan MOORA</h3>
+
+    {{-- Xij --}}
+    <h4>Matriks Keputusan (Xij)</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Alternatif</th>
+            @foreach($criteria as $c)
+                <th>{{ $c->code }}</th>
+            @endforeach
+        </tr>
+        @foreach($alternatives as $a)
+        <tr>
+            <td>{{ $a->nama_kain }}</td>
+            @foreach($criteria as $c)
+                <td>{{ $matrix[$a->id][$c->id] }}</td>
+            @endforeach
+        </tr>
+        @endforeach
+    </table>
+
+    {{-- Rij --}}
+    <h4>Matriks Normalisasi (Rij)</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Alternatif</th>
+            @foreach($criteria as $c)
+                <th>{{ $c->code }}</th>
+            @endforeach
+        </tr>
+        @foreach($alternatives as $a)
+        <tr>
+            <td>{{ $a->product->name }}</td>
+            @foreach($criteria as $c)
+                <td>{{ number_format($normalisasi[$a->id][$c->id],4) }}</td>
+            @endforeach
+        </tr>
+        @endforeach
+    </table>
+
+    {{-- Vij --}}
+    <h4>Matriks Terbobot (Vij)</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Alternatif</th>
+            @foreach($criteria as $c)
+                <th>{{ $c->code }}</th>
+            @endforeach
+        </tr>
+        @foreach($alternatives as $a)
+        <tr>
+            <td>{{ $a->product->name }}</td>
+            @foreach($criteria as $c)
+                <td>{{ number_format($terbobot[$a->id][$c->id],4) }}</td>
+            @endforeach
+        </tr>
+        @endforeach
+    </table>
+
+    {{-- Yi --}}
+    <h4>Nilai Preferensi (Yi)</h4>
+    <table class="pairwise-table">
+        <tr>
+            <th>Produk</th>
+            <th>Yi</th>
+        </tr>
+        @foreach($optimasi as $id=>$v)
+@php $alt = $alternatives->firstWhere('id',$id); @endphp
+<tr>
+    <td>{{ $alt?->nama_kain ?? '-' }}</td>
+    <td>{{ number_format($v,4) }}</td>
+</tr>
+@endforeach
+    </table>
+
+</div>
+
+
+        {{-- ===================== PRODUK REKOMENDASI ===================== --}}
+        
+        {{-- 🔒 BAGIAN INI TIDAK DIUBAH --}}
+        <div class="pairwise-header" style="margin-top:50px">
+            <h2>Produk Rekomendasi Terbaik</h2>
+            <p>
+                Produk dengan nilai preferensi tertinggi berdasarkan
+                perhitungan <strong>Fuzzy AHP</strong> dan <strong>MOORA</strong>.
+            </p>
+        </div>
+
+        <div class=" recommendation-list-wrapper">
+
+           @php $rank = 1; @endphp
+
+@foreach($recommendedProducts as $rec)
+    @php
+        $alt     = $rec['alternative'];
+        $product = $alt->product;
+        $score   = $rec['score'];
+    @endphp
+
+    <div class="recommendation-item {{ $rank == 1 ? 'best-item' : '' }}">
+
+        <div class="rec-image">
+            <img src="{{ $product->image }}" alt="">
+        </div>
+
+        <div class="rec-info">
+            <h3>
+                #{{ $rank }} {{ $alt->nama_kain }}
+
+                @if($rank == 1)
+                    <span class="best-label">
+                           <i data-lucide="award"></i> Paling Direkomendasikan
+                    </span>
+                @endif
+            </h3>
+
+            <!-- 🔥 INFO PRODUK -->
+            <p><small>Produk: {{ $product->name }}</small></p>
+
+            <p class="rec-price">
+                Rp {{ number_format($product->price,0,',','.') }}
+            </p>
+
+            <p class="rec-score">
+                Skor Yi: <strong>{{ number_format($score,4) }}</strong>
+            </p>
+
+            <a href="{{ route('user.product.show', $product->id) }}"
+               class="btn-detail">
+                Lihat Detail Produk
+            </a>
+        </div>
+
+    </div>
+
+    @php $rank++; @endphp
+@endforeach
+
+            <div class="pairwise-actions">
+                <a href="{{ route('user.product.index') }}" class="btn-outline">
+                    Lihat Semua Produk
+                </a>
+
+                <a href="{{ route('pairwise.index') }}" class="btn-primary">
+                    Ulangi Perhitungan
+                </a>
+            </div>
+
+        </div>
+
+    </section>
+</div>
+
+<script>
+function toggle(id){
+    const el = document.getElementById(id);
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+</script>
+
+@endsection
